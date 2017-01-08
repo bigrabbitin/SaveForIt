@@ -35,7 +35,7 @@ contract SaveForIt {
   uint8 nextSerialNumber = 1;
 
   // Money that has come in, but not been distributed yet.
-  uint256 public unprocessedFunds;
+  uint256 public processedFunds;
 
   // Max amount of wei this account can have. Any further funds are sent off to the overflow account.
   uint256 public max;
@@ -51,6 +51,7 @@ contract SaveForIt {
 
   // Contract can be killed, returning all funds back to the original owner.
   function kill() onlyOwner {
+    // TODO: Kill all children contracts too?
     selfdestruct(owner);
   }
 
@@ -59,16 +60,15 @@ contract SaveForIt {
   // won't have a lot of gas, so basically just record that we got some funds that need
   // to be processed.
   function() payable {
-    // TODO: This seems to be running out of gas when called from another contract, but fine when called
-    // from a user.
-    unprocessedFunds += msg.value;
+    // There isn't enough gas to do anything. We rely on the processedFunds to figure out if we
+    // recieved any money.
   }
 
   // Function that adds a predistribution account. A predistribution account gets funds
   // before this contract itself gets them.
   // Note, _percentShare is 0 <= _percentShare <= 100
   // TODO: How to remove a account?
-  function updatePredistributionAccount(address _to, uint8 _percentShare) onlyOwner returns (bool success) {
+  function updatePredistributionAccount(address _to, uint8 _percentShare) onlyOwner external returns (bool success) {
     if (_percentShare > 100) throw; // Can't allocate more than 100%
 
     // Ensure that the address _to was created by this contract. What we really want to check is that
@@ -89,7 +89,7 @@ contract SaveForIt {
   }
 
   // Add a new Predistribution account. A new contract will be created and its address is returned.
-  function addPredistributionAccount(uint8 _percentShare) onlyOwner returns (address newAccount) {
+  function addPredistributionAccount(uint8 _percentShare) onlyOwner external returns (address newAccount) {
     if (_percentShare > 100) throw; // Can't allocate more than 100%
     // Before adding, check to make sure that the new percentShare total won't be over 100
     if (! ensurePercentTotal(_percentShare )) throw;
@@ -107,7 +107,7 @@ contract SaveForIt {
 
   // Set the max amount of wei this account will take. If over, then send it to the next overflow account.
   // TODO: Allow multiple overflow accounts, with percentages just like the predistribution.
-  function setAccountMax(uint256 _max, address _overflow_to) onlyOwner returns (bool success) {
+  function setAccountMax(uint256 _max, address _overflow_to) onlyOwner external returns (bool success) {
     max = _max;
     overflow_to = _overflow_to;
   }
@@ -129,7 +129,8 @@ contract SaveForIt {
   }
 
   // Process all unprocessedFunds.
-  function process() returns (bool success) {
+  function process() external returns (bool success) {
+    uint256 unprocessedFunds = address(this).balance - processedFunds;
     if (unprocessedFunds == 0) return true;
 
     uint256 accountBalance = address(this).balance - unprocessedFunds;
@@ -155,7 +156,7 @@ contract SaveForIt {
     if (moneyRemaining == 0) return true;
 
     // Check if this account is over max.
-    if ( (accountBalance + moneyRemaining) > max) {
+    if ( overflow_to != address(0) && max > 0 && (accountBalance + moneyRemaining) > max) {
       // Send extra money to the overflow account
       if (!overflow_to.send((accountBalance + moneyRemaining) - max)) {
           // TODO: Now what?
@@ -163,7 +164,7 @@ contract SaveForIt {
     }
 
     // Everything was processed.
-    unprocessedFunds = 0;
+    processedFunds = address(this).balance;
 
     // Go and process the contract for everyone.
     for(i = 1; i < nextSerialNumber; i++) {
@@ -180,9 +181,14 @@ contract SaveForItFactory {
   address public firstContract;
 
   // First time users, do this.
-  function deploy() {
+  function SaveForItFactory() {
     address owner = msg.sender;
     firstContract = create(owner, owner);
+  }
+
+  function() {
+    // Can't send money to this contract;
+    throw;
   }
 
   function create(address owner, address parent) returns (address child) {
