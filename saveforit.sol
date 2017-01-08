@@ -5,11 +5,17 @@ Main contract for SaveForIt, a DApp that helps you save up for stuff and other l
 */
 
 contract SaveForIt {
-  address owner;
+  address public owner;
+  address public parent;
+
+  // Factory that creates these contracts.
+  SaveForItFactory factory;
 
   // Constructor. Save all needed info.
-  function SaveForIt() {
-    owner = msg.sender;
+  function SaveForIt(address _owner, address _parent, SaveForItFactory _factory) {
+    owner = _owner;
+    parent = _parent;
+    factory = _factory;
     // TODO: Maybe even store the parent contract?
   }
 
@@ -53,6 +59,8 @@ contract SaveForIt {
   // won't have a lot of gas, so basically just record that we got some funds that need
   // to be processed.
   function() payable {
+    // TODO: This seems to be running out of gas when called from another contract, but fine when called
+    // from a user.
     unprocessedFunds += msg.value;
   }
 
@@ -60,28 +68,41 @@ contract SaveForIt {
   // before this contract itself gets them.
   // Note, _percentShare is 0 <= _percentShare <= 100
   // TODO: How to remove a account?
-  function addPredistributionAccount(address _to, uint8 _percentShare) onlyOwner returns (bool success) {
+  function updatePredistributionAccount(address _to, uint8 _percentShare) onlyOwner returns (bool success) {
     if (_percentShare > 100) throw; // Can't allocate more than 100%
 
-    // First, see if we already have a record of the account. If we do, all we need
-    // to do is update the percentShare.
-    if (reversePredis[_to] > 0) {
-      // Existing account, just update the percentage
-      predis[reversePredis[_to]].percentShare = _percentShare;
+    // Ensure that the address _to was created by this contract. What we really want to check is that
+    // address _to is a instance of this contract, but there doesn't seem to be any easy way to do that.
+    if (reversePredis[_to] == 0) {
+      // Account is not created here. Freak out.
+      throw;
     } else {
-      // Create new account
-      // TODO: Actually create the contract here instead of accepting an address. This way, we can be sure that
-      // there are no circular references.
-      predis[nextSerialNumber] = PredisChildren(_to, _percentShare);
-      reversePredis[_to] = nextSerialNumber;
-      nextSerialNumber++;
+      // Before updating, check to make sure that the new percentShare total won't be over 100
+      if (! ensurePercentTotal(-predis[reversePredis[_to]].percentShare +_percentShare )) throw;
+
+      predis[reversePredis[_to]].percentShare = _percentShare;
     }
 
-    // TODO: ensure that percentShare total is < 100 for all the accounts.
     // TODO: When we throw(), do the modifications made to the contract variable before
     // the throw() stick? Or are they roleld back?
-
     return true;
+  }
+
+  // Add a new Predistribution account. A new contract will be created and its address is returned.
+  function addPredistributionAccount(uint8 _percentShare) onlyOwner returns (address newAccount) {
+    if (_percentShare > 100) throw; // Can't allocate more than 100%
+    // Before adding, check to make sure that the new percentShare total won't be over 100
+    if (! ensurePercentTotal(_percentShare )) throw;
+
+    // Create a new contract address
+    newAccount = factory.create(owner, this);
+
+    // Then Add the contract to the maps.
+    predis[nextSerialNumber] = PredisChildren(newAccount, _percentShare);
+    reversePredis[newAccount] = nextSerialNumber;
+    nextSerialNumber++;
+
+    return newAccount;
   }
 
   // Set the max amount of wei this account will take. If over, then send it to the next overflow account.
@@ -91,26 +112,36 @@ contract SaveForIt {
     overflow_to = _overflow_to;
   }
 
+  // Ensure that the existing predistribution percentage totals + additionalValue is not over 100.
+  // Note that this function returns true/false, the caller has to determine whether to throw;
+  function ensurePercentTotal(uint8 additionalValue) internal returns (bool success) {
+    uint8 totalPercentage;
+
+    // Ensure that predis total < 100
+    for(uint8 i = 1; i < nextSerialNumber; i++) {
+      totalPercentage += predis[i].percentShare;
+      if (totalPercentage > 100) return false;
+    }
+
+    if (totalPercentage + additionalValue > 100) return false;
+
+    return true;
+  }
+
   // Process all unprocessedFunds.
   function process() returns (bool success) {
     if (unprocessedFunds == 0) return true;
 
-    uint8 totalPercentage;
     uint256 accountBalance = address(this).balance - unprocessedFunds;
 
     // First pass, ensure that predis total < 100
-    for(uint8 i = 1; i < nextSerialNumber; i++) {
-      if (predis[i].percentShare == 0) continue;  // Nothing to do for this address
-
-      totalPercentage += predis[i].percentShare;
-      if (totalPercentage > 100) throw;
-    }
+    if (! ensurePercentTotal(0)) throw;
     // It is fine if totalPercentage < 100, it just means the remaining amount becomes part of this account.
 
     // Send money to all the predistribution children.
     // TODO: Should we process predistributions even if this account has reached max? Right now the answer is yes.
     uint256 moneySent;
-    for(i = 1; i < nextSerialNumber; i++) {
+    for(uint8 i = 1; i < nextSerialNumber; i++) {
       if (predis[i].percentShare == 0) continue;  // Nothing to do for this address
 
       // Send the percentage of share to the predistribution address.
@@ -134,7 +165,29 @@ contract SaveForIt {
     // Everything was processed.
     unprocessedFunds = 0;
 
-    // TODO: trigger processing for all children.
+    // Go and process the contract for everyone.
+    for(i = 1; i < nextSerialNumber; i++) {
+      if (predis[i].percentShare == 0) continue;  // Nothing to do for this address
+
+      SaveForIt(predis[i].addr).process();
+    }
   }
 
+}
+
+// Factory for creating SaveForIt contracts
+contract SaveForItFactory {
+  address public firstContract;
+
+  // First time users, do this.
+  function deploy() {
+    address owner = msg.sender;
+    firstContract = create(owner, owner);
+  }
+
+  function create(address owner, address parent) returns (address child) {
+    child = new SaveForIt(owner, parent, this);
+
+    return child;
+  }
 }
